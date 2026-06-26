@@ -1,358 +1,285 @@
 const mineflayer = require('mineflayer');
-const { pathfinder, Movements, goals } = require('mineflayer-pathfinder');
-const config = require('./config');
+const config     = require('./config');
 
-// ─── Renkli log sistemi ────────────────────────────────────────────────────
-const log = {
-  info:    (msg) => console.log(`\x1b[36m[${time()}] [BİLGİ]\x1b[0m ${msg}`),
-  success: (msg) => console.log(`\x1b[32m[${time()}] [TAMAM]\x1b[0m ${msg}`),
-  warn:    (msg) => console.log(`\x1b[33m[${time()}] [UYARI]\x1b[0m ${msg}`),
-  error:   (msg) => console.log(`\x1b[31m[${time()}] [HATA]\x1b[0m ${msg}`),
-  chat:    (msg) => console.log(`\x1b[35m[${time()}] [SOHBET]\x1b[0m ${msg}`),
+// ── Renklı log ──────────────────────────────────────────────────────────────
+const C = { reset:'\x1b[0m', red:'\x1b[31m', green:'\x1b[32m', yellow:'\x1b[33m', cyan:'\x1b[36m', magenta:'\x1b[35m' };
+const now = () => new Date().toLocaleTimeString('tr-TR');
+const L = {
+  info  : (m) => console.log(`${C.cyan}[${now()}] ℹ  ${m}${C.reset}`),
+  ok    : (m) => console.log(`${C.green}[${now()}] ✔  ${m}${C.reset}`),
+  warn  : (m) => console.log(`${C.yellow}[${now()}] ⚠  ${m}${C.reset}`),
+  err   : (m) => console.log(`${C.red}[${now()}] ✖  ${m}${C.reset}`),
+  chat  : (m) => console.log(`${C.magenta}[${now()}] 💬 ${m}${C.reset}`),
 };
 
-function time() {
-  return new Date().toLocaleTimeString('tr-TR');
-}
+// ── Durum ───────────────────────────────────────────────────────────────────
+let bot            = null;
+let afkTimer       = null;
+let statusTimer    = null;
+let reconnectTimer = null;
+let attempt        = 0;
+let alive          = false;
+let startedAt      = null;
 
-// ─── Durum değişkenleri ────────────────────────────────────────────────────
-let bot;
-let reconnectAttempt = 0;
-let afkInterval      = null;
-let statusInterval   = null;
-let isConnected      = false;
-let startTime        = null;
+// ── Yardımcılar ─────────────────────────────────────────────────────────────
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-// ─── Bot oluştur ───────────────────────────────────────────────────────────
-function createBot() {
-  log.info(`Sunucuya bağlanılıyor: ${config.host}:${config.port} → Kullanıcı: ${config.username}`);
-
-  bot = mineflayer.createBot({
-    host:          config.host,
-    port:          config.port,
-    username:      config.username,
-    version:       config.version || false,
-    auth:          config.auth || 'offline',
-    checkTimeoutInterval: 30000,
-    keepAlive:     true,
-  });
-
-  bot.loadPlugin(pathfinder);
-
-  // ── Bağlantı olayları ──────────────────────────────────────────────────
-  bot.once('spawn', onSpawn);
-  bot.on('chat', onChat);
-  bot.on('kicked', onKicked);
-  bot.on('error', onError);
-  bot.on('end', onEnd);
-  bot.on('death', onDeath);
-  bot.on('health', onHealth);
-}
-
-// ─── Spawn olayı ──────────────────────────────────────────────────────────
-function onSpawn() {
-  isConnected    = true;
-  startTime      = Date.now();
-  reconnectAttempt = 0;
-
-  log.success(`Sunucuya bağlandı! Konum: ${fmtPos(bot.entity.position)}`);
-
-  // Pathfinder hareketi ayarla
-  const mcData   = require('minecraft-data')(bot.version);
-  const movements = new Movements(bot, mcData);
-  movements.canDig         = false;
-  movements.allow1by1towers = false;
-  bot.pathfinder.setMovements(movements);
-
-  // Sunucuya giriş mesajı
-  if (config.loginMessage) {
-    setTimeout(() => safeSay(config.loginMessage), 2000);
-  }
-
-  // Anti-AFK döngüsünü başlat
-  startAntiAfk();
-
-  // Durum raporu döngüsünü başlat
-  startStatusLoop();
-
-  log.info('Anti-AFK sistemi aktif ✔');
-}
-
-// ─── Anti-AFK sistemi ──────────────────────────────────────────────────────
-function startAntiAfk() {
-  clearInterval(afkInterval);
-
-  afkInterval = setInterval(() => {
-    if (!isConnected || !bot?.entity) return;
-
-    const action = weightedRandom([
-      { fn: doRandomWalk,   weight: 35 },
-      { fn: doLookAround,   weight: 25 },
-      { fn: doJump,         weight: 15 },
-      { fn: doSneak,        weight: 10 },
-      { fn: doSwing,        weight: 10 },
-      { fn: doRotateView,   weight: 5  },
-    ]);
-
-    try { action(); } catch (_) {}
-
-  }, config.afkInterval || 15000);
-}
-
-// Anti-AFK eylemleri
-function doRandomWalk() {
-  const pos    = bot.entity.position;
-  const radius = config.walkRadius || 10;
-  const tx     = pos.x + randBetween(-radius, radius);
-  const tz     = pos.z + randBetween(-radius, radius);
-
-  const goal = new goals.GoalXZ(Math.floor(tx), Math.floor(tz));
-  bot.pathfinder.setGoal(goal, true);
-  log.info(`Yürüyüş: (${Math.floor(tx)}, ${Math.floor(tz)})`);
-}
-
-function doLookAround() {
-  const yaw   = Math.random() * Math.PI * 2 - Math.PI;
-  const pitch = randBetween(-0.5, 0.5);
-  bot.look(yaw, pitch, false);
-  log.info('Etrafına bakıyor...');
-}
-
-function doJump() {
-  bot.setControlState('jump', true);
-  setTimeout(() => bot.setControlState('jump', false), 600);
-  log.info('Zıpladı!');
-}
-
-function doSneak() {
-  bot.setControlState('sneak', true);
-  setTimeout(() => bot.setControlState('sneak', false), randBetween(500, 2000));
-  log.info('Sinerek hareket etti...');
-}
-
-function doSwing() {
-  bot.swingArm('right');
-  log.info('Kol salladı.');
-}
-
-function doRotateView() {
-  let yaw = bot.entity.yaw;
-  const steps = 8;
-  let i = 0;
-  const iv = setInterval(() => {
-    if (i++ >= steps || !isConnected) { clearInterval(iv); return; }
-    yaw += (Math.PI * 2) / steps;
-    bot.look(yaw, 0, false);
-  }, 300);
-}
-
-// ─── Durum raporu döngüsü ─────────────────────────────────────────────────
-function startStatusLoop() {
-  clearInterval(statusInterval);
-  statusInterval = setInterval(() => {
-    if (!isConnected || !bot?.entity) return;
-
-    const players = Object.keys(bot.players).length;
-    const uptime  = fmtUptime(Date.now() - startTime);
-    const pos     = fmtPos(bot.entity.position);
-    const hp      = bot.health?.toFixed(1) ?? '?';
-    const food    = bot.food ?? '?';
-
-    log.info(`━━ DURUM RAPORU ━━ Oyuncular: ${players} | HP: ${hp} | Yemek: ${food} | Konum: ${pos} | Uptime: ${uptime}`);
-  }, config.statusInterval || 60000);
-}
-
-// ─── Sohbet komutları ─────────────────────────────────────────────────────
-function onChat(username, message) {
-  if (username === bot.username) return;
-  log.chat(`${username}: ${message}`);
-
-  const prefix = config.commandPrefix || '!';
-  if (!message.startsWith(prefix)) return;
-
-  const [cmd, ...args] = message.slice(prefix.length).trim().toLowerCase().split(/\s+/);
-
-  // Sadece izin verilen oyuncular komut kullanabilsin
-  if (config.adminPlayers.length > 0 && !config.adminPlayers.includes(username)) {
-    if (['stop','restart','goto'].includes(cmd)) {
-      safeSay(`${username}, bu komutu kullanma yetkin yok!`);
-      return;
-    }
-  }
-
-  switch (cmd) {
-    case 'yardım':
-    case 'help':
-      safeSay(`§6[Marvis Bot] §fKomutlar: ${prefix}durum | ${prefix}oyuncular | ${prefix}konum | ${prefix}git <x> <z> | ${prefix}dur | ${prefix}yeniden | ${prefix}ping`);
-      break;
-
-    case 'durum':
-    case 'status':
-      const up = fmtUptime(Date.now() - startTime);
-      safeSay(`§a[Marvis Bot] §fHP: ${bot.health?.toFixed(1)} | Yemek: ${bot.food} | Uptime: ${up} | Bağlı: ✔`);
-      break;
-
-    case 'oyuncular':
-    case 'players':
-      const list = Object.keys(bot.players).join(', ') || 'Kimse yok';
-      safeSay(`§b[Marvis Bot] §fSunucudaki oyuncular: ${list}`);
-      break;
-
-    case 'konum':
-    case 'pos':
-      safeSay(`§e[Marvis Bot] §fKonum: ${fmtPos(bot.entity.position)}`);
-      break;
-
-    case 'git':
-    case 'goto':
-      if (args.length < 2) { safeSay('Kullanım: !git <x> <z>'); break; }
-      const gx = parseInt(args[0]);
-      const gz = parseInt(args[1]);
-      if (isNaN(gx) || isNaN(gz)) { safeSay('Geçersiz koordinat!'); break; }
-      bot.pathfinder.setGoal(new goals.GoalXZ(gx, gz));
-      safeSay(`§a[Marvis Bot] §f(${gx}, ${gz}) konumuna gidiyorum!`);
-      break;
-
-    case 'dur':
-    case 'stop':
-      bot.pathfinder.setGoal(null);
-      clearInterval(afkInterval);
-      safeSay('§c[Marvis Bot] §fDurdum. Yeniden başlatmak için !yeniden kullan.');
-      break;
-
-    case 'yeniden':
-    case 'restart':
-      safeSay('§e[Marvis Bot] §fYeniden başlatılıyor...');
-      setTimeout(() => { bot.quit(); }, 1000);
-      break;
-
-    case 'ping':
-      safeSay(`§b[Marvis Bot] §fPong! 🏓 Gecikme: ${bot.player?.ping ?? '?'} ms`);
-      break;
-
-    case 'ver':
-    case 'version':
-      safeSay(`§d[Marvis Bot] §fMinecraft ${bot.version} | mineflayer`);
-      break;
-
-    default:
-      safeSay(`§c[Marvis Bot] §fBilinmeyen komut: ${prefix}${cmd} — Yardım için: ${prefix}yardım`);
-  }
-}
-
-// ─── Ölüm olayı ───────────────────────────────────────────────────────────
-function onDeath() {
-  log.warn('Bot öldü! Yeniden doğuyor...');
-  bot.respawn?.();
-  setTimeout(() => {
-    if (config.respawnMessage) safeSay(config.respawnMessage);
-  }, 2000);
-}
-
-// ─── Sağlık takibi ────────────────────────────────────────────────────────
-function onHealth() {
-  if (bot.health <= config.lowHealthWarning) {
-    log.warn(`Düşük can: ${bot.health}`);
-  }
-}
-
-// ─── Atılma / Hata / Bağlantı kesilmesi ──────────────────────────────────
-function onKicked(reason) {
-  isConnected = false;
-  try {
-    const parsed = JSON.parse(reason);
-    log.warn(`Sunucudan atıldı: ${parsed?.text ?? reason}`);
-  } catch {
-    log.warn(`Sunucudan atıldı: ${reason}`);
-  }
-}
-
-function onError(err) {
-  if (err.code === 'ECONNREFUSED') {
-    log.error('Bağlantı reddedildi. Sunucu kapalı olabilir.');
-  } else {
-    log.error(`Hata: ${err.message}`);
-  }
-}
-
-function onEnd(reason) {
-  isConnected = false;
-  clearInterval(afkInterval);
-  clearInterval(statusInterval);
-
-  log.warn(`Bağlantı kesildi. Sebep: ${reason}`);
-  scheduleReconnect();
-}
-
-// ─── Yeniden bağlanma mantığı ─────────────────────────────────────────────
-function scheduleReconnect() {
-  if (reconnectAttempt >= config.maxReconnectAttempts) {
-    log.error(`Maksimum yeniden bağlanma denemesi aşıldı (${config.maxReconnectAttempts}). Duruluyor.`);
-    process.exit(1);
-  }
-
-  reconnectAttempt++;
-  const delay = Math.min(config.reconnectDelay * reconnectAttempt, 120000); // maks 2 dakika
-
-  log.info(`${delay / 1000} saniye sonra yeniden bağlanılacak... (Deneme ${reconnectAttempt}/${config.maxReconnectAttempts})`);
-
-  setTimeout(() => {
-    log.info(`Yeniden bağlanılıyor... (${reconnectAttempt}. deneme)`);
-    createBot();
-  }, delay);
-}
-
-// ─── Yardımcı fonksiyonlar ────────────────────────────────────────────────
-function safeSay(msg) {
-  try { bot.chat(msg); } catch (_) {}
-}
-
-function fmtPos(pos) {
-  if (!pos) return '?';
-  return `X:${Math.floor(pos.x)} Y:${Math.floor(pos.y)} Z:${Math.floor(pos.z)}`;
-}
-
-function fmtUptime(ms) {
-  const s = Math.floor(ms / 1000);
-  const m = Math.floor(s / 60);
-  const h = Math.floor(m / 60);
-  if (h > 0)      return `${h}s ${m % 60}d ${s % 60}sn`;
-  if (m > 0)      return `${m}d ${s % 60}sn`;
+function uptime() {
+  if (!startedAt) return '0sn';
+  const s = Math.floor((Date.now() - startedAt) / 1000);
+  const m = Math.floor(s / 60), h = Math.floor(m / 60);
+  if (h)  return `${h}s ${m % 60}d`;
+  if (m)  return `${m}d ${s % 60}sn`;
   return `${s}sn`;
 }
 
-function randBetween(min, max) {
-  return Math.random() * (max - min) + min;
+function say(msg) {
+  try { bot?.chat(msg); } catch (_) {}
 }
 
-function weightedRandom(items) {
-  const total  = items.reduce((s, i) => s + i.weight, 0);
-  let rand     = Math.random() * total;
-  for (const item of items) {
-    rand -= item.weight;
-    if (rand <= 0) return item.fn;
+// ── Ana bağlantı fonksiyonu ─────────────────────────────────────────────────
+function connect() {
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+
+  attempt++;
+  L.info(`Bağlanılıyor → ${config.host}:${config.port}  (Deneme ${attempt})`);
+
+  try {
+    bot = mineflayer.createBot({
+      host          : config.host,
+      port          : config.port,
+      username      : config.username,
+      version       : config.version,      // config.js'de doğru versiyon yazılmalı!
+      auth          : 'offline',
+      hideErrors    : false,
+    });
+  } catch (e) {
+    L.err(`Bot oluşturulamadı: ${e.message}`);
+    scheduleReconnect();
+    return;
   }
-  return items[0].fn;
+
+  // ── Eventler ──────────────────────────────────────────────────────────────
+
+  bot.on('login', () => {
+    L.ok('Sunucuya giriş yapıldı (login)!');
+  });
+
+  bot.once('spawn', () => {
+    alive     = true;
+    startedAt = Date.now();
+    attempt   = 0;
+
+    const pos = bot.entity.position;
+    L.ok(`Spawn oldu! X:${~~pos.x} Y:${~~pos.y} Z:${~~pos.z} | Versiyon: ${bot.version}`);
+
+    setTimeout(() => say(config.spawnMsg || 'MarvisBot aktif! !yardim yaz.'), 2000);
+
+    startAfk();
+    startStatus();
+  });
+
+  bot.on('chat', handleChat);
+
+  bot.on('death', () => {
+    L.warn('Bot öldü, respawn yapıyor...');
+    setTimeout(() => { try { bot.respawn(); } catch(_){} }, 1000);
+  });
+
+  bot.on('kicked', (reason) => {
+    alive = false;
+    let r = reason;
+    try { r = JSON.parse(reason)?.text ?? reason; } catch(_){}
+    L.warn(`Sunucudan atıldı: ${r}`);
+  });
+
+  bot.on('error', (err) => {
+    // Sadece önemli hataları logla
+    const code = err.code ?? '';
+    if (code === 'ECONNREFUSED') {
+      L.warn('Bağlantı reddedildi — sunucu kapalı olabilir.');
+    } else if (code === 'ETIMEDOUT' || code === 'ESOCKETTIMEDOUT') {
+      L.warn('Bağlantı zaman aşımı.');
+    } else if (code === 'ENOTFOUND') {
+      L.warn('Sunucu adresi bulunamadı — host adresini kontrol et.');
+    } else {
+      L.err(`Hata [${code}]: ${err.message}`);
+    }
+  });
+
+  bot.on('end', (reason) => {
+    stopAfk();
+    alive = false;
+    L.warn(`Bağlantı kesildi. Sebep: ${reason ?? 'bilinmiyor'}`);
+    scheduleReconnect();
+  });
 }
 
-// ─── Çıkış sinyalleri ─────────────────────────────────────────────────────
+// ── Yeniden bağlan ──────────────────────────────────────────────────────────
+function scheduleReconnect() {
+  const delay = Math.min(10000 * attempt, 120000);  // maks 2 dakika
+  L.info(`${delay / 1000} saniye sonra yeniden bağlanılacak...`);
+  reconnectTimer = setTimeout(connect, delay);
+}
+
+// ── Anti-AFK sistemi ────────────────────────────────────────────────────────
+const MOVES = [
+  () => walk('forward',  1200),
+  () => walk('back',     900),
+  () => walk('left',     700),
+  () => walk('right',    700),
+  () => jump(),
+  () => lookRandom(),
+  () => spin(),
+  () => sneak(),
+];
+
+function walk(dir, ms) {
+  bot.setControlState(dir, true);
+  setTimeout(() => { try { bot.setControlState(dir, false); } catch(_){} }, ms);
+  L.info(`Hareket: ${dir} (${ms}ms)`);
+}
+
+function jump() {
+  bot.setControlState('jump', true);
+  setTimeout(() => { try { bot.setControlState('jump', false); } catch(_){} }, 500);
+  L.info('Zıpladı');
+}
+
+function lookRandom() {
+  const yaw   = (Math.random() * 360 - 180) * (Math.PI / 180);
+  const pitch = (Math.random() * 60 - 30)   * (Math.PI / 180);
+  try { bot.look(yaw, pitch, false); } catch(_){}
+  L.info('Etrafına baktı');
+}
+
+function spin() {
+  let step = 0;
+  const iv = setInterval(() => {
+    if (!alive || step++ >= 8) { clearInterval(iv); return; }
+    try { bot.look(bot.entity.yaw + Math.PI / 4, 0, false); } catch(_){}
+  }, 250);
+  L.info('Döndü');
+}
+
+function sneak() {
+  bot.setControlState('sneak', true);
+  setTimeout(() => { try { bot.setControlState('sneak', false); } catch(_){} }, 800);
+  L.info('Sindi');
+}
+
+function startAfk() {
+  stopAfk();
+  const interval = config.afkInterval ?? 12000;
+  afkTimer = setInterval(() => {
+    if (!alive || !bot?.entity) return;
+    try {
+      const fn = MOVES[Math.floor(Math.random() * MOVES.length)];
+      fn();
+    } catch(_) {}
+  }, interval);
+  L.info(`Anti-AFK başladı (her ${interval/1000}sn)`);
+}
+
+function stopAfk() {
+  clearInterval(afkTimer);
+  clearInterval(statusTimer);
+  afkTimer    = null;
+  statusTimer = null;
+}
+
+// ── Durum raporu ────────────────────────────────────────────────────────────
+function startStatus() {
+  statusTimer = setInterval(() => {
+    if (!alive || !bot?.entity) return;
+    const pos = bot.entity.position;
+    const p   = Object.keys(bot.players ?? {}).length;
+    L.info(`[DURUM] Uptime: ${uptime()} | Oyuncular: ${p} | HP: ${bot.health ?? '?'} | X:${~~pos.x} Y:${~~pos.y} Z:${~~pos.z}`);
+  }, config.statusInterval ?? 60000);
+}
+
+// ── Sohbet komutları ────────────────────────────────────────────────────────
+function handleChat(username, message) {
+  if (username === bot.username) return;
+  L.chat(`${username}: ${message}`);
+
+  if (!message.startsWith('!')) return;
+  const [cmd, ...args] = message.slice(1).trim().split(/\s+/);
+
+  const isAdmin = config.admins.length === 0 || config.admins.includes(username);
+
+  switch (cmd.toLowerCase()) {
+    case 'yardim':
+    case 'help':
+      say('Komutlar: !durum !oyuncular !konum !dur !baslat !ping');
+      break;
+
+    case 'durum':
+      say(`HP:${bot.health?.toFixed(0)} Yemek:${bot.food} Uptime:${uptime()} Oyuncu:${Object.keys(bot.players??{}).length}`);
+      break;
+
+    case 'oyuncular':
+      say('Sunucuda: ' + (Object.keys(bot.players ?? {}).join(', ') || 'kimse yok'));
+      break;
+
+    case 'konum': {
+      const p = bot.entity?.position;
+      say(p ? `X:${~~p.x} Y:${~~p.y} Z:${~~p.z}` : 'Konum bilinmiyor');
+      break;
+    }
+
+    case 'ping':
+      say(`Pong! ${bot.player?.ping ?? '?'}ms`);
+      break;
+
+    case 'dur':
+      if (!isAdmin) { say('Yetkin yok!'); return; }
+      stopAfk();
+      say('Anti-AFK durduruldu.');
+      break;
+
+    case 'baslat':
+      if (!isAdmin) { say('Yetkin yok!'); return; }
+      startAfk();
+      say('Anti-AFK başlatıldı.');
+      break;
+
+    case 'yeniden':
+      if (!isAdmin) { say('Yetkin yok!'); return; }
+      say('Yeniden bağlanılıyor...');
+      setTimeout(() => bot.quit(), 500);
+      break;
+  }
+}
+
+// ── İşlem çıkış ─────────────────────────────────────────────────────────────
 process.on('SIGINT', () => {
-  log.warn('Çıkış sinyali alındı. Bot kapatılıyor...');
-  try { bot.quit('Bot kapatıldı'); } catch (_) {}
+  L.warn('Kapatılıyor...');
+  try { bot?.quit('Kapatıldı'); } catch(_) {}
   process.exit(0);
 });
 
-process.on('uncaughtException', (err) => {
-  log.error(`Beklenmeyen hata: ${err.message}`);
-  if (!isConnected) scheduleReconnect();
+process.on('uncaughtException', (e) => {
+  L.err(`Kritik hata: ${e.message}`);
 });
 
-// ─── Başlat ───────────────────────────────────────────────────────────────
-console.log('\x1b[36m');
-console.log('╔══════════════════════════════════════════╗');
-console.log('║        MARVİS AFKBot  v2.0               ║');
-console.log('║  Minecraft Sunucu Canlı Tutma Botu       ║');
-console.log('╚══════════════════════════════════════════╝');
-console.log('\x1b[0m');
+process.on('unhandledRejection', (e) => {
+  L.err(`İşlenmemiş promise: ${e}`);
+});
 
-createBot();
+// ── Başlat ──────────────────────────────────────────────────────────────────
+console.log('\x1b[36m');
+console.log(' ███╗   ███╗ █████╗ ██████╗ ██╗   ██╗██╗███████╗');
+console.log(' ████╗ ████║██╔══██╗██╔══██╗██║   ██║██║██╔════╝');
+console.log(' ██╔████╔██║███████║██████╔╝██║   ██║██║███████╗');
+console.log(' ██║╚██╔╝██║██╔══██║██╔══██╗╚██╗ ██╔╝██║╚════██║');
+console.log(' ██║ ╚═╝ ██║██║  ██║██║  ██║ ╚████╔╝ ██║███████║');
+console.log(' ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝  ╚═══╝  ╚═╝╚══════╝');
+console.log('              AFKBot v3.0\x1b[0m\n');
+L.info(`Host   : ${config.host}:${config.port}`);
+L.info(`User   : ${config.username}`);
+L.info(`Version: ${config.version}`);
+L.info(`Admins : ${config.admins.join(', ') || 'Herkese açık'}`);
+console.log('');
+
+connect();
