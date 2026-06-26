@@ -9,7 +9,7 @@ module.exports = {
   host: 'majesteminecraft.aternos.me',  // ← Aternos adresini buraya yaz
   port: 34482,                            // Varsayılan Minecraft portu
   username: 'MarvisBot',                  // Botun kullanıcı adı
-  version: false,                         // false = otomatik algıla, ya da '1.20.1' gibi yaz
+  version: "26.1.2",                         // false = otomatik algıla, ya da '1.20.1' gibi yaz
   auth: 'offline',                        // 'offline' = cracked | 'microsoft' = premium hesap
 
   // ── Yönetici Oyuncular ────────────────────────────────────────────
